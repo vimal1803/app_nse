@@ -12,16 +12,37 @@ app = Flask(__name__)
 
 # ================== CONFIGURATION ==================
 ETF_DATA = {
-    "BANKBEES.NS": "Banking (Private)", "PSUBNKBEES.NS": "Banking (PSU)",
-    "ITBEES.NS": "IT / Tech", "HEALTHIETF.NS": "Healthcare",
-    "PHARMABEES.NS": "Pharmaceuticals", "AUTOIETF.NS": "Automobile",
-    "FMCGIETF.NS": "FMCG", "MOREALTY.NS": "Real Estate",
-    "CPSEETF.NS": "Energy", "INFRABEES.NS": "Infrastructure",
-    "METALIETF.NS": "Metals", "CONSUMBEES.NS": "Consumption",
-    "NIFTY_FIN_SERVICE.NS": "Financial Services", "MODEFENCE.NS": "Defense",
-    "MAKEINDIA.NS": "Manufacturing", "CAPITALSFB.NS": "Capital Markets",
-    "TNIDETF.NS": "Digital India", "EVINDIA.NS": "EV & New Age Auto",
-    "ICICIB22.NS": "Diversified PSU", "ALPHA.NS" : "Alpha"
+    # Banking & Finance
+    "BANKBEES.NS": "Banking (Private)", 
+    "PSUBNKBEES.NS": "Banking (PSU)",
+    "NIFTY_FIN_SERVICE.NS": "Financial Services",
+    "FINIETF.NS": "Capital Markets", # Fixed symbol
+    
+    # Technology & Digital
+    "ITBEES.NS": "IT / Tech", 
+    "TNIDETF.NS": "Digital India",
+    
+    # Healthcare
+    "HEALTHIETF.NS": "Healthcare",
+    "PHARMABEES.NS": "Pharmaceuticals",
+    
+    # Consumption & Automobile
+    "AUTOIETF.NS": "Automobile",
+    "FMCGIETF.NS": "FMCG",
+    "CONSUMBEES.NS": "Consumption",
+    "EVINDIA.NS": "EV & New Age Auto",
+    
+    # Infrastructure & Commodities
+    "INFRABEES.NS": "Infrastructure",
+    "METALIETF.NS": "Metals",
+    "MOREALTY.NS": "Real Estate",
+    "CPSEETF.NS": "Energy",
+    
+    # Strategic & Thematic
+    "MODEFENCE.NS": "Defense",
+    "ICICIB22.NS": "Diversified PSU",
+    "GOLDBEES.NS": "GOld",
+    "ALPHA.NS": "Alpha" # Fixed symbol
 }
 
 BENCHMARKS = {
