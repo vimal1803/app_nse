@@ -1,4 +1,5 @@
-from flask import Flask, jsonify, render_template_string
+import os
+from flask import Flask, jsonify, render_template_string, request
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -9,7 +10,7 @@ warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 
-# ================== NSE CONFIGURATION ==================
+# ================== CONFIGURATION ==================
 ETF_DATA = {
     "BANKBEES.NS": "Banking (Private)", "PSUBNKBEES.NS": "Banking (PSU)",
     "ITBEES.NS": "IT / Tech", "HEALTHIETF.NS": "Healthcare",
@@ -22,32 +23,35 @@ ETF_DATA = {
     "TNIDETF.NS": "Digital India", "EVINDIA.NS": "EV & New Age Auto",
     "ICICIB22.NS": "Diversified PSU", "ALPHA.NS" : "Alpha"
 }
-TICKERS = list(ETF_DATA.keys())
-BENCHMARK = "^CRSLDX"
-TOTAL_CAPITAL = 100000
 
-# ================== RRG ENGINE CORE ==================
+BENCHMARKS = {
+    "^CRSLDX": "Nifty 500 (Broad)",
+    "^NSEI": "Nifty 50 (Large Cap)",
+    "^NSEMDCP50": "Nifty Midcap 50",
+    "MON100.NS": "Nasdaq 100 (Global Tech)"
+}
+
+TICKERS = list(ETF_DATA.keys())
+
+# ================== RRG ENGINE LOGIC ==================
+
 def calculate_rrg_metrics(data, tickers, bench):
     rs = data[tickers].div(data[bench], axis=0) * 100
     rs_smooth = rs.ewm(span=3, adjust=False).mean()
-    
-    # Standard RRG Normalization (10/5 lookback)
     ratio = 100 + ((rs_smooth - rs_smooth.rolling(10).mean()) / rs_smooth.rolling(10).std())
     mom_raw = ratio.diff()
     mom = 100 + ((mom_raw - mom_raw.rolling(5).mean()) / mom_raw.rolling(5).std())
-    
     curl = mom.diff().iloc[-1]
-    velocity = np.sqrt(ratio.diff()**2 + mom.diff()**2).iloc[-1]
-    
-    return ratio.iloc[-1], mom.iloc[-1], curl, velocity
+    return ratio.iloc[-1], mom.iloc[-1], curl
 
-def get_nse_rrg_data():
-    # Fetch Monthly (Guardrail) and Weekly (Timing) Data
-    m_data = yf.download(TICKERS + [BENCHMARK], period="5y", interval="1mo", progress=False)['Close'].ffill().dropna()
-    w_data = yf.download(TICKERS + [BENCHMARK], period="2y", interval="1wk", progress=False)['Close'].ffill().dropna()
+def get_market_intelligence(benchmark_ticker):
+    m_data = yf.download(TICKERS + [benchmark_ticker], period="5y", interval="1mo", progress=False)['Close'].ffill().dropna()
+    w_data = yf.download(TICKERS + [benchmark_ticker], period="2y", interval="1wk", progress=False)['Close'].ffill().dropna()
+    d_data = yf.download(TICKERS + [benchmark_ticker], period="6mo", interval="1d", progress=False)['Close'].ffill().dropna()
 
-    m_ratio, m_mom, m_curl, m_vel = calculate_rrg_metrics(m_data, TICKERS, BENCHMARK)
-    w_ratio, w_mom, w_curl, w_vel = calculate_rrg_metrics(w_data, TICKERS, BENCHMARK)
+    m_ratio, m_mom, m_curl = calculate_rrg_metrics(m_data, TICKERS, benchmark_ticker)
+    _, _, w_curl = calculate_rrg_metrics(w_data, TICKERS, benchmark_ticker)
+    _, _, d_curl = calculate_rrg_metrics(d_data, TICKERS, benchmark_ticker)
 
     results = []
     for t in TICKERS:
@@ -55,69 +59,93 @@ def get_nse_rrg_data():
             "Weakening" if m_ratio[t] >= 100 and m_mom[t] < 100 else \
             "Lagging" if m_ratio[t] < 100 and m_mom[t] < 100 else "Improving"
         
-        # Scoring Logic
         score = (m_curl[t] * 2.5) 
         if w_curl[t] > 0.5: score += 2.0
-        if q == "Improving": score += 2.5
+        if d_curl[t] > 0.2: score += 1.0
+        if q == "Improving": score += 2.5 
         if q in ["Leading", "Weakening"]: score -= 3.0
         
-        # Monthly Directional Guardrail
-        is_guarded = m_curl[t] <= 0
-        final_score = score if not is_guarded else min(score, 2.0)
-        
+        final_score = score if m_curl[t] > 0 else min(score, 2.0)
         status = "🔥 BUY/HOLD" if final_score > 6 else "❄️ EXIT" if final_score < 0 else "⏳ NEUTRAL"
 
         results.append({
-            "ticker": t, "sector": ETF_DATA[t], "quadrant": q,
-            "m_curl": round(m_curl[t], 2), "w_curl": round(w_curl[t], 2),
-            "vel": round(m_vel[t], 2), "score": round(final_score, 2), "status": status
+            "ticker": t, "sector": ETF_DATA[t], "quad": q,
+            "m_curl": round(m_curl[t], 2), "w_curl": round(w_curl[t], 2), "d_curl": round(d_curl[t], 2),
+            "score": round(final_score, 2), "status": status
         })
     
     return sorted(results, key=lambda x: x['score'], reverse=True)
 
-# ================== ROUTES ==================
+# ================== FLASK ROUTES ==================
 
 @app.route('/')
-def dashboard():
-    data = get_nse_rrg_data()
+def index():
+    selected_bench = request.args.get('bench', '^CRSLDX')
+    data = get_market_intelligence(selected_bench)
+    
     html_template = """
     <!DOCTYPE html>
     <html>
     <head>
-        <title>NSE RRG Dashboard</title>
+        <title>NSE RRG Engine</title>
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
         <style>
-            body { background: #f8f9fa; padding: 25px; font-family: 'Segoe UI', sans-serif; }
-            .card { border: none; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border-radius: 12px; }
-            .status-buy { color: #198754; font-weight: bold; background: #e8f5e9; padding: 4px 10px; border-radius: 20px; }
-            .status-exit { color: #dc3545; font-weight: bold; background: #ffebee; padding: 4px 10px; border-radius: 20px; }
-            .badge-leading { background-color: #198754; } .badge-improving { background-color: #0d6efd; }
+            body { background-color: #f1f4f9; font-family: 'Segoe UI', sans-serif; }
+            .header-card { background: #1a237e; color: white; border-radius: 15px; margin-bottom: 20px; padding: 25px; }
+            .badge-leading { background: #2e7d32; } 
+            .badge-improving { background: #1565c0; }
+            .badge-lagging { background: #c62828; }
+            .badge-weakening { background: #6c757d; color: white; } /* Updated to Grey */
+            .score-cell { font-size: 1.2rem; font-weight: bold; color: #1a237e; }
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="d-flex justify-content-between align-items-center mb-4">
-                <h2>🚀 NSE RRG Sector Engine</h2>
-                <span class="text-muted">Updated: {{ now }}</span>
+        <div class="container py-4">
+            <div class="header-card d-flex justify-content-between align-items-center">
+                <div>
+                    <h2 class="mb-0">🚀 NSE Sector Engine</h2>
+                    <p class="mb-0 text-white-50">Triple-Timeframe Rotation Analysis</p>
+                </div>
+                <div class="d-flex align-items-center">
+                    <label class="me-2 fw-bold">Benchmark:</label>
+                    <select class="form-select w-auto" onchange="window.location.href='/?bench='+this.value">
+                        {% for ticker, name in benchmarks.items() %}
+                        <option value="{{ ticker }}" {{ 'selected' if ticker == current_bench else '' }}>{{ name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
             </div>
-            <div class="card p-4">
-                <table class="table table-hover">
-                    <thead class="table-dark">
+
+            <div class="card shadow-sm border-0 rounded-4 overflow-hidden">
+                <table class="table table-hover align-middle mb-0 text-center">
+                    <thead class="table-light">
                         <tr>
-                            <th>Ticker</th><th>Sector</th><th>Quadrant</th><th>M_Curl</th><th>Score</th><th>Status</th>
+                            <th class="text-start">Ticker / Sector</th>
+                            <th>Trend</th>
+                            <th>M_Curl</th>
+                            <th>W_Curl</th>
+                            <th>D_Curl</th>
+                            <th>Prob_Score</th>
+                            <th>Action</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for item in results %}
+                        {% for row in results %}
                         <tr>
-                            <td><strong>{{ item.ticker }}</strong></td>
-                            <td>{{ item.sector }}</td>
-                            <td><span class="badge {{ 'badge-leading' if item.quadrant=='Leading' else 'badge-improving' if item.quadrant=='Improving' else 'bg-secondary' }}">
-                                {{ item.quadrant }}</span></td>
-                            <td>{{ item.m_curl }}</td>
-                            <td><strong>{{ item.score }}</strong></td>
-                            <td><span class="{{ 'status-buy' if 'BUY' in item.status else 'status-exit' if 'EXIT' in item.status else '' }}">
-                                {{ item.status }}</span></td>
+                            <td class="text-start ps-3">
+                                <strong>{{ row.ticker }}</strong><br>
+                                <small class="text-muted">{{ row.sector }}</small>
+                            </td>
+                            <td><span class="badge badge-{{ row.quad|lower }}">{{ row.quad }}</span></td>
+                            <td>{{ row.m_curl }}</td>
+                            <td>{{ row.w_curl }}</td>
+                            <td>{{ row.d_curl }}</td>
+                            <td class="score-cell">{{ row.score }}</td>
+                            <td>
+                                <span class="badge {{ 'bg-success' if 'BUY' in row.status else 'bg-danger' if 'EXIT' in row.status else 'bg-secondary' }}">
+                                    {{ row.status }}
+                                </span>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -127,21 +155,8 @@ def dashboard():
     </body>
     </html>
     """
-    return render_template_string(html_template, results=data, now=datetime.now().strftime('%H:%M IST'))
-
-@app.route('/api/v1/signals')
-def api_signals():
-    try:
-        data = get_nse_rrg_data()
-        top_picks = [i for i in data if i['score'] > 6.0][:2]
-        return jsonify({
-            "timestamp": datetime.now().isoformat(),
-            "all_results": data,
-            "top_conviction_picks": top_picks
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return render_template_string(html_template, results=data, benchmarks=BENCHMARKS, current_bench=selected_bench)
 
 if __name__ == '__main__':
-    # Local development
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
