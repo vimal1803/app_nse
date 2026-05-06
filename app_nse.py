@@ -1,9 +1,8 @@
-import os
-from flask import Flask, jsonify, render_template_string, request
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
+import os
+from flask import Flask, render_template_string, jsonify
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -12,171 +11,197 @@ app = Flask(__name__)
 
 # ================== CONFIGURATION ==================
 ETF_DATA = {
-    # Banking & Finance
-    "BANKBEES.NS": "Banking (Private)", 
-    "PSUBNKBEES.NS": "Banking (PSU)",
-    "NIFTY_FIN_SERVICE.NS": "Financial Services",
-    "FINIETF.NS": "Capital Markets", # Fixed symbol
-    
-    # Technology & Digital
-    "ITBEES.NS": "IT / Tech", 
-    "TNIDETF.NS": "Digital India",
-    
-    # Healthcare
-    "HEALTHIETF.NS": "Healthcare",
-    "PHARMABEES.NS": "Pharmaceuticals",
-    
-    # Consumption & Automobile
-    "AUTOIETF.NS": "Automobile",
-    "FMCGIETF.NS": "FMCG",
-    "CONSUMBEES.NS": "Consumption",
-    "EVINDIA.NS": "EV & New Age Auto",
-    
-    # Infrastructure & Commodities
-    "INFRABEES.NS": "Infrastructure",
-    "METALIETF.NS": "Metals",
-    "MOREALTY.NS": "Real Estate",
-    "CPSEETF.NS": "Energy",
-    
-    # Strategic & Thematic
-    "MODEFENCE.NS": "Defense",
-    "ICICIB22.NS": "Diversified PSU",
-    "GOLDBEES.NS": "GOld",
-    "ALPHA.NS": "Alpha" # Fixed symbol
-}
-
-BENCHMARKS = {
-    "^CRSLDX": "Nifty 500 (Broad)",
-    "^NSEI": "Nifty 50 (Large Cap)",
-    "^NSEMDCP50": "Nifty Midcap 50",
-    "MON100.NS": "Nasdaq 100 (Global Tech)"
+    "BANKBEES.NS": "Nippon India Bank BeES", 
+    "PSUBNKBEES.NS": "Nippon India PSU Bank BeES",
+    "ITBEES.NS": "Nippon India IT BeES", 
+    "PHARMABEES.NS": "Nippon India Pharma BeES", 
+    "AUTOIETF.NS": "ICICI Prudential Nifty Auto ETF", 
+    "FMCGIETF.NS": "ICICI Prudential Nifty FMCG ETF",
+    "METALIETF.NS": "ICICI Prudential Nifty Metal ETF", 
+    "CONSUMBEES.NS": "Nippon India ETF Consumption",
+    "MOREALTY.NS": "Motilal Oswal Nifty Realty ETF", 
+    "INFRABEES.NS": "Nippon India Infra BeES",
+    "CPSEETF.NS": "CPSE ETF (Energy & PSUs)", 
+    "OIL.NS": "Nippon India ETF Oil & Gas",
+    "MODEFENCE.NS": "Motilal Oswal Nifty Defence Index ETF", 
+    "ALPHA.NS" : "Kotak Nifty Alpha 50 ETF", 
+    "MOMENTUM.NS": "Motilal Oswal Momentum 30 ETF", 
+    "MIDCAPETF.NS": "Mirae Asset Midcap 150 ETF", 
+    "EVINDIA.NS": "Mirae Asset Nifty EV & New Mobility ETF"
 }
 
 TICKERS = list(ETF_DATA.keys())
+BENCHMARK = "^CRSLDX" 
+VIX_TICKER = "^INDIAVIX"
 
-# ================== RRG ENGINE LOGIC ==================
+# ================== ANALYTICS ENGINE ==================
 
-def calculate_rrg_metrics(data, tickers, bench):
-    rs = data[tickers].div(data[bench], axis=0) * 100
-    rs_smooth = rs.ewm(span=3, adjust=False).mean()
-    ratio = 100 + ((rs_smooth - rs_smooth.rolling(10).mean()) / rs_smooth.rolling(10).std())
-    mom_raw = ratio.diff()
-    mom = 100 + ((mom_raw - mom_raw.rolling(5).mean()) / mom_raw.rolling(5).std())
-    curl = mom.diff().iloc[-1]
-    return ratio.iloc[-1], mom.iloc[-1], curl
+def calculate_curl(prices, benchmark, span=5):
+    """Enhanced Curl Engine with adaptive smoothing."""
+    rs = prices.div(benchmark + 1e-9, axis=0) * 100
+    rs_smooth = rs.ewm(span=span, adjust=False).mean()
+    
+    # Z-Score normalization for relative strength stability
+    ratio = 100 + ((rs_smooth - rs_smooth.rolling(20).mean()) / (rs_smooth.rolling(20).std() + 1e-9))
+    
+    # Second derivative (Momentum of Momentum)
+    diff_ratio = ratio.diff()
+    mom = 100 + ((diff_ratio - diff_ratio.rolling(10).mean()) / (diff_ratio.rolling(10).std() + 1e-9))
+    
+    # Final smoothing to prevent flickering
+    return mom.diff().ewm(span=3, adjust=False).mean()
 
-def get_market_intelligence(benchmark_ticker):
-    m_data = yf.download(TICKERS + [benchmark_ticker], period="5y", interval="1mo", progress=False)['Close'].ffill().dropna()
-    w_data = yf.download(TICKERS + [benchmark_ticker], period="2y", interval="1wk", progress=False)['Close'].ffill().dropna()
-    d_data = yf.download(TICKERS + [benchmark_ticker], period="6mo", interval="1d", progress=False)['Close'].ffill().dropna()
-
-    m_ratio, m_mom, m_curl = calculate_rrg_metrics(m_data, TICKERS, benchmark_ticker)
-    _, _, w_curl = calculate_rrg_metrics(w_data, TICKERS, benchmark_ticker)
-    _, _, d_curl = calculate_rrg_metrics(d_data, TICKERS, benchmark_ticker)
-
+def get_engine_data():
+    # Fetch 2 years of data to ensure indicators (like 200-day averages) are fully primed
+    raw_all = yf.download(TICKERS + [BENCHMARK, VIX_TICKER], period="2y", interval="1d", progress=False)
+    raw_close = raw_all['Close'].ffill().dropna()
+    raw_vol = raw_all['Volume'].ffill()
+    raw_high = raw_all['High'].ffill()
+    raw_low = raw_all['Low'].ffill()
+    
+    vix = float(raw_close[VIX_TICKER].iloc[-1])
+    
+    # VIX-Adaptive Threshold Logic
+    # High VIX (>18) = Tighten entry, loosen exit (Defensive)
+    # Low VIX (<14) = Aggressive entry (Offensive)
+    vix_factor = max(1.0, vix / 15.0)
+    ENTRY_VELOCITY = 0.35 * vix_factor
+    DECAY_THRESHOLD = -0.45 / vix_factor
+    
+    # Calculate MTF Curls
+    q_curls = calculate_curl(raw_close[TICKERS], raw_close[BENCHMARK], span=65)
+    m_curls = calculate_curl(raw_close[TICKERS], raw_close[BENCHMARK], span=21)
+    w_curls = calculate_curl(raw_close[TICKERS], raw_close[BENCHMARK], span=10)
+    d_curls = calculate_curl(raw_close[TICKERS], raw_close[BENCHMARK], span=5)
+    
     results = []
     for t in TICKERS:
-        q = "Leading" if m_ratio[t] >= 100 and m_mom[t] >= 100 else \
-            "Weakening" if m_ratio[t] >= 100 and m_mom[t] < 100 else \
-            "Lagging" if m_ratio[t] < 100 and m_mom[t] < 100 else "Improving"
+        qc, mc, wc, dc = float(q_curls[t].iloc[-1]), float(m_curls[t].iloc[-1]), float(w_curls[t].iloc[-1]), float(d_curls[t].iloc[-1])
+        qc_p, mc_p, wc_p, dc_p = float(q_curls[t].iloc[-2]), float(m_curls[t].iloc[-2]), float(w_curls[t].iloc[-2]), float(d_curls[t].iloc[-2])
         
-        score = (m_curl[t] * 2.5) 
-        if w_curl[t] > 0.5: score += 2.0
-        if d_curl[t] > 0.2: score += 1.0
-        if q == "Improving": score += 2.5 
-        if q in ["Leading", "Weakening"]: score -= 3.0
+        qa, ma, wa, da = ("↑" if qc > qc_p else "↓"), ("↑" if mc > mc_p else "↓"), ("↑" if wc > wc_p else "↓"), ("↑" if dc > dc_p else "↓")
         
-        final_score = score if m_curl[t] > 0 else min(score, 2.0)
-        status = "🔥 BUY/HOLD" if final_score > 6 else "❄️ EXIT" if final_score < 0 else "⏳ NEUTRAL"
+        # Volatility Calculation (ATR % based)
+        tr = np.maximum(raw_high[t] - raw_low[t], np.maximum(abs(raw_high[t] - raw_close[t].shift(1)), abs(raw_low[t] - raw_close[t].shift(1))))
+        atr_pct = (tr.rolling(14).mean() / raw_close[t]).iloc[-1] * 100
+
+        # Volume Confirmation
+        curr_vol = raw_vol[t].iloc[-1]
+        avg_vol = raw_vol[t].rolling(20).mean().iloc[-1]
+        vol_ratio = round(float(curr_vol / (avg_vol + 1e-9)), 2)
+        
+        price = float(raw_close[t].iloc[-1])
+        ema20 = float(raw_close[t].ewm(span=20, adjust=False).mean().iloc[-1])
+        dist_from_ema = price / ema20
+        
+        # Scoring Algorithm (Weighting: Monthly 50%, Weekly 30%, Daily 20%)
+        aggro_score = (mc * 0.5) + (wc * 0.3) + (dc * 0.2)
+        
+        # Decision Matrix
+        exit_triggered = False
+        if dist_from_ema >= 1.12:
+            rec, color, exit_triggered = "PARABOLIC CLIMAX", "danger", True
+        elif dc < DECAY_THRESHOLD and dist_from_ema > 1.04:
+            rec, color, exit_triggered = "MOMENTUM ROTATION", "warning", True
+        elif (dc > ENTRY_VELOCITY and dc > dc_p) and (dist_from_ema <= 1.08):
+            rec, color = "STRONG ACCUMULATE", "success"
+        elif aggro_score > 0.1:
+            rec, color = "BULLISH HOLD", "info"
+        else:
+            rec, color = "WAIT / OBSERVE", "secondary"
 
         results.append({
-            "ticker": t, "sector": ETF_DATA[t], "quad": q,
-            "m_curl": round(m_curl[t], 2), "w_curl": round(w_curl[t], 2), "d_curl": round(d_curl[t], 2),
-            "score": round(final_score, 2), "status": status
+            "ticker": t, "name": ETF_DATA[t], "price": f"₹{price:,.2f}",
+            "qc": round(qc, 2), "qa": qa, "mc": round(mc, 2), "ma": ma,
+            "wc": round(wc, 2), "wa": wa, "dc": round(dc, 2), "da": da,
+            "score": round(aggro_score, 2), "atr": round(atr_pct, 2),
+            "vol": vol_ratio, "rec": rec, "color": color, "exit_triggered": exit_triggered
         })
     
-    return sorted(results, key=lambda x: x['score'], reverse=True)
+    # Sort by the new Weighted Aggro Score
+    return sorted(results, key=lambda x: x['score'], reverse=True), round(vix, 2)
 
-# ================== FLASK ROUTES ==================
+# ================== ROUTES ==================
+
+@app.route('/api/signals')
+def api_signals():
+    data, vix = get_engine_data()
+    return jsonify({"vix": vix, "timestamp": pd.Timestamp.now().isoformat(), "signals": data})
 
 @app.route('/')
 def index():
-    selected_bench = request.args.get('bench', '^CRSLDX')
-    data = get_market_intelligence(selected_bench)
-    
-    html_template = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>NSE RRG Engine</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-        <style>
-            body { background-color: #f1f4f9; font-family: 'Segoe UI', sans-serif; }
-            .header-card { background: #1a237e; color: white; border-radius: 15px; margin-bottom: 20px; padding: 25px; }
-            .badge-leading { background: #2e7d32; } 
-            .badge-improving { background: #1565c0; }
-            .badge-lagging { background: #c62828; }
-            .badge-weakening { background: #6c757d; color: white; } /* Updated to Grey */
-            .score-cell { font-size: 1.2rem; font-weight: bold; color: #1a237e; }
-        </style>
-    </head>
-    <body>
-        <div class="container py-4">
-            <div class="header-card d-flex justify-content-between align-items-center">
-                <div>
-                    <h2 class="mb-0">🚀 NSE Sector Engine</h2>
-                    <p class="mb-0 text-white-50">Triple-Timeframe Rotation Analysis</p>
+    try:
+        data, vix = get_engine_data()
+        html = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+            <style>
+                body { background-color: #f4f7f6; color: #2c3e50; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 0.85rem; }
+                .container-fluid { max-width: 1600px; padding: 2rem; }
+                .terminal-card { background: white; border-radius: 15px; border: none; box-shadow: 0 10px 30px rgba(0,0,0,0.08); overflow: hidden; }
+                .vix-indicator { font-weight: 800; padding: 10px 20px; border-radius: 8px; background: #e74c3c; color: white; }
+                .table thead th { background: #f8f9fa; color: #7f8c8d; font-weight: 600; text-transform: uppercase; border: none; padding: 1.2rem; }
+                .score-pill { background: #2c3e50; color: white; padding: 5px 12px; border-radius: 6px; font-weight: bold; font-family: monospace; }
+                .exit-row { background-color: rgba(231, 76, 60, 0.05) !important; }
+                .status-badge { border-radius: 4px; padding: 8px; width: 100%; display: block; font-weight: bold; text-align: center; }
+            </style>
+            <title>Alpha Aggressor v11.0 Robust</title>
+        </head>
+        <body>
+            <div class="container-fluid">
+                <div class="d-flex justify-content-between align-items-center mb-5">
+                    <div>
+                        <h1 class="fw-bold mb-0">ALPHA AGGRESSOR <span class="text-primary">v11.0</span></h1>
+                        <p class="text-muted">VIX-Adaptive Robust Momentum Engine</p>
+                    </div>
+                    <div class="vix-indicator">INDIA VIX: {{ vix }}</div>
                 </div>
-                <div class="d-flex align-items-center">
-                    <label class="me-2 fw-bold">Benchmark:</label>
-                    <select class="form-select w-auto" onchange="window.location.href='/?bench='+this.value">
-                        {% for ticker, name in benchmarks.items() %}
-                        <option value="{{ ticker }}" {{ 'selected' if ticker == current_bench else '' }}>{{ name }}</option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
 
-            <div class="card shadow-sm border-0 rounded-4 overflow-hidden">
-                <table class="table table-hover align-middle mb-0 text-center">
-                    <thead class="table-light">
-                        <tr>
-                            <th class="text-start">Ticker / Sector</th>
-                            <th>Trend</th>
-                            <th>M_Curl</th>
-                            <th>W_Curl</th>
-                            <th>D_Curl</th>
-                            <th>Prob_Score</th>
-                            <th>Action</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for row in results %}
-                        <tr>
-                            <td class="text-start ps-3">
-                                <strong>{{ row.ticker }}</strong><br>
-                                <small class="text-muted">{{ row.sector }}</small>
-                            </td>
-                            <td><span class="badge badge-{{ row.quad|lower }}">{{ row.quad }}</span></td>
-                            <td>{{ row.m_curl }}</td>
-                            <td>{{ row.w_curl }}</td>
-                            <td>{{ row.d_curl }}</td>
-                            <td class="score-cell">{{ row.score }}</td>
-                            <td>
-                                <span class="badge {{ 'bg-success' if 'BUY' in row.status else 'bg-danger' if 'EXIT' in row.status else 'bg-secondary' }}">
-                                    {{ row.status }}
-                                </span>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <div class="terminal-card">
+                    <table class="table align-middle mb-0">
+                        <thead>
+                            <tr>
+                                <th>Instrument</th>
+                                <th>Aggro Score</th>
+                                <th>MTF Curl Chain</th>
+                                <th>ATR % (Vol)</th>
+                                <th>Vol Ratio</th>
+                                <th>Signal Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in data %}
+                            <tr class="{{ 'exit-row' if row.exit_triggered else '' }}">
+                                <td>
+                                    <span class="fw-bold d-block" style="font-size: 1.1rem; color: #0d6efd;">{{ row.ticker }}</span>
+                                    <span class="text-dark fw-bold">{{ row.price }}</span><br>
+                                    <small class="text-muted">{{ row.name }}</small>
+                                </td>
+                                <td><span class="score-pill">{{ row.score }}</span></td>
+                                <td>
+                                    <span class="badge {{ 'bg-success' if row.qa == '↑' else 'bg-danger' }}">{{ row.qc }} {{ row.qa }}</span>
+                                    <span class="badge {{ 'bg-success' if row.ma == '↑' else 'bg-danger' }}">{{ row.mc }} {{ row.ma }}</span>
+                                    <span class="badge {{ 'bg-success' if row.wa == '↑' else 'bg-danger' }}">{{ row.wc }} {{ row.wa }}</span>
+                                    <span class="badge {{ 'bg-success' if row.da == '↑' else 'bg-danger' }}">{{ row.dc }} {{ row.da }}</span>
+                                </td>
+                                <td>{{ row.atr }}%</td>
+                                <td><span class="badge bg-dark">{{ row.vol }}x</span></td>
+                                <td><span class="status-badge bg-{{ row.color }}">{{ row.rec }}</span></td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
-        </div>
-    </body>
-    </html>
-    """
-    return render_template_string(html_template, results=data, benchmarks=BENCHMARKS, current_bench=selected_bench)
+        </body>
+        </html>
+        """
+        return render_template_string(html, data=data, vix=vix)
+    except Exception as e:
+        return f"System Error: {str(e)}"
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8080))
